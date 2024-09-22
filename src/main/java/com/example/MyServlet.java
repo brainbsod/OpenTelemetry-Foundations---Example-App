@@ -12,13 +12,111 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 
+// OpenTelemetry API Imports
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
+
+// OpenTelemetry SDK Imports
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
+import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator;
+
+// OpenTelemetry Exporter & Propgator Imports
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
+import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
+import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
+import io.opentelemetry.context.propagation.ContextPropagators;
+import io.opentelemetry.exporter.logging.LoggingSpanExporter;
+
 public class MyServlet extends HttpServlet {
+
+    // Define Class Fields
+    private static final String INSTRUMENTATION_NAME = MyServlet.class.getName();
+    private final Meter meter;
+    private final LongCounter requestCounter;
+    private final Tracer tracer;
+
+    // Default Constructor
+    // Initializes OpenTelemetry and calls parameterized constructor with this new
+    // instance of OpenTelemetry
+    public MyServlet() {
+        this(initOpenTelemetry());
+    }
+
+    // Parameterized Constructor
+    // Accepts OpenTelemetry instance and initializes the meter, request counter and
+    // tracer.
+    public MyServlet(OpenTelemetry openTelemetry) {
+        this.meter = openTelemetry.getMeter(INSTRUMENTATION_NAME);
+        this.requestCounter = meter.counterBuilder("app.db.db_requests")
+                .setDescription("Counts DB requests")
+                .build();
+        this.tracer = openTelemetry.getTracer(INSTRUMENTATION_NAME);
+    }
+
+    // Initializes OpenTelemetry
+    static OpenTelemetry initOpenTelemetry() {
+        // Metrics
+        OtlpGrpcMetricExporter otlpGrpcMetricExporter = OtlpGrpcMetricExporter.builder()
+                .setEndpoint("http://localhost:4317").build();
+
+        PeriodicMetricReader periodicMetricReader = PeriodicMetricReader.builder(otlpGrpcMetricExporter)
+                .setInterval(java.time.Duration.ofSeconds(5))
+                .build();
+
+        SdkMeterProvider sdkMeterProvider = SdkMeterProvider.builder()
+                .registerMetricReader(periodicMetricReader)
+                .build();
+
+        // Traces
+        OtlpGrpcSpanExporter otlpGrpcSpanExporter = OtlpGrpcSpanExporter.builder()
+                .setEndpoint("http://localhost:4317").build();
+
+        SdkTracerProvider sdkTracerProvider = SdkTracerProvider.builder()
+                .addSpanProcessor(SimpleSpanProcessor.create(otlpGrpcSpanExporter))
+                .build();
+
+        // Traces as Logs
+        SdkTracerProvider sdkTracerProviderLogs = SdkTracerProvider.builder()
+                .addSpanProcessor(SimpleSpanProcessor.create(LoggingSpanExporter.create()))
+                .build();
+
+        // SDK
+        OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setMeterProvider(sdkMeterProvider)
+                .setTracerProvider(sdkTracerProvider)
+                .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
+                //.setTracerProvider(sdkTracerProviderLogs) // NOTE: This line has to be commented out when using live.
+                                                          // The second `.setTracerProvder(..)` will override previous
+                                                          // one
+                .build();
+
+        // Cleanup
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            sdkMeterProvider.close();
+            sdkTracerProvider.close();
+        }));
+
+        return sdk;
+    }
 
     @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response)
             throws ServletException, IOException {
         response.setContentType("text/html");
 
+        // Increment metric counter
+        requestCounter.add(1);
+
+        // Start a span
+        Span span = tracer.spanBuilder("initiate database query").startSpan();
+
+        // Establish database connection and get data
         try (PrintWriter out = response.getWriter()) {
             // JDBC connection parameters
             String jdbcUrl = "jdbc:mysql://localhost:3306/mydatabase";
@@ -51,6 +149,8 @@ public class MyServlet extends HttpServlet {
             e.printStackTrace();
             response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "An error occurred while processing the request.");
+        } finally {
+            span.end(); // Close the span once request complete
         }
     }
 }
