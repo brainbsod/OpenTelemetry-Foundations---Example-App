@@ -90,7 +90,8 @@ public class MyServlet extends HttpServlet {
         OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
                 .setMeterProvider(sdkMeterProvider)
                 .setTracerProvider(sdkTracerProvider)
-                .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))                
+                .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
+                // .setTracerProvider(sdkTracerProviderLogs) // NOTE: This line has to be commented out when using live. The second `.setTracerProvder(..)` will override previous one           
                 .build();
 
         // Cleanup
